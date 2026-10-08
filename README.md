@@ -7,6 +7,12 @@
 
 # Lunii.QT
 
+> **Fork [scarlaty/Lunii.QT](https://github.com/scarlaty/Lunii.QT)** de [o-daneel/Lunii.QT](https://github.com/o-daneel/Lunii.QT).
+> Ajout **expérimental** : import d'histoires non officielles / homemade (`.plain.pk`) sur **Flam** en
+> réutilisant les clés d'une histoire déjà présente (« carrier »). Validé sur une seule Flam (fw 1.15.14) :
+> détails, limites et appel à testeurs dans [IMPORT_CARRIER.md](IMPORT_CARRIER.md) ; autres changements dans
+> [FORK_CHANGES.md](FORK_CHANGES.md).
+
 Une application Python QT pour gérer sa fabrique à histoires (fah) <u>Lunii</u> et <u>Flam</u>, avec les opérations de  **organisation** / **importation** / **exportation** / **téléchargement du firmware**   
 pour Windows 11 / MacOs (11 BigSur => 26 Tahoe) / Linux   
 (compatible avec les archives STUdio, **avec** support de la conversion audio)
