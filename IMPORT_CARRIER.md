@@ -379,14 +379,32 @@ et les logs l'expliquent.
    « Annuler » pour scanner l'appareil, choisir un carrier.
 4. Éjecter la Flam, la redémarrer, noter : titre lisible ? histoire lancée ?
    lecture complète ?
-5. Ouvrir une *issue* sur [scarlaty/Lunii.QT](https://github.com/scarlaty/Lunii.QT/issues)
+5. **Rebrancher la Flam** dans Lunii.QT : le log affiche une ligne
+   `[carrier] firmware check …` (voir ci-dessous).
+6. Ouvrir une *issue* sur [scarlaty/Lunii.QT](https://github.com/scarlaty/Lunii.QT/issues)
    avec le résultat et **toutes les lignes `[carrier]`** du log.
+
+**Contrôle automatique par le firmware.** Au démarrage, la Flam reconstruit
+`usr/0/library.cache` avec les titres qu'elle a réussi à déchiffrer ; Lunii.QT
+le supprime à chaque écriture. Chaque import carrier est mémorisé dans
+`~/.lunii-qt/flam_carrier_imports.json` (SNU, UUID, titre, firmware, empreinte
+du carrier). Au branchement suivant, **avant** de toucher au cache, Lunii.QT
+cherche le titre dans `library.cache` :
+
+| Statut | Signification |
+|---|---|
+| `OK` | titre présent : le firmware a déchiffré l'histoire |
+| `PENDING` | cache absent : la Flam n'a pas redémarré depuis la dernière écriture |
+| `FAIL` | cache reconstruit mais titre absent : histoire probablement illisible |
+
+Validé sur la Flam de référence : Tobie Lolness importée en carrier → `OK`.
 
 **Ce que contiennent les logs `[carrier]`** : SNU et firmware (main / comm),
 fichier des `bt` (présent, nombre, empreintes), verdict pour chaque histoire
 (compte = 4 premiers octets du `key`, source du `bt`, vérifié, titre), résumé du
 scan, puis pour l'import : `.plain.pk` (UUID, nombre de scripts Lua, version),
-carrier choisi, fichiers chiffrés / copiés, relecture (`key`, titre), durée.
+carrier choisi, fichiers chiffrés / copiés, relecture (`key`, titre), durée,
+puis au branchement suivant le contrôle firmware (`OK` / `PENDING` / `FAIL`).
 
 Les `bt` n'apparaissent **jamais en clair** dans les logs : seulement une
 empreinte (8 premiers caractères du sha256), qui permet de comparer des logs
@@ -401,8 +419,8 @@ autres histoires ne sont pas modifiés.
 
 | Fichier | Ajout |
 |---|---|
-| `pkg/api/constants.py` | `FLAM_KNOWN_BTS` (chemin du fichier des `bt` connus) |
-| `pkg/api/device_flam.py` | `_read_carrier_from_zip`, `_load_known_bts`, `save_known_bt`, `stories_matching_bt`, `_bt_decrypts_info`, `_detect_bt_from_info`, `find_available_carriers` (cache, sauvegarde auto, logs), `import_flam_plain_carrier` (logs, relecture), `_clog`, `_bt_fingerprint`, `_info_title` ; cache invalidé dans `update_pack_index` |
+| `pkg/api/constants.py` | `FLAM_KNOWN_BTS` (fichier des `bt` connus), `FLAM_CARRIER_IMPORTS` (journal des imports carrier) |
+| `pkg/api/device_flam.py` | `_read_carrier_from_zip`, `_load_known_bts`, `save_known_bt`, `stories_matching_bt`, `_bt_decrypts_info`, `_detect_bt_from_info`, `find_available_carriers` (cache, sauvegarde auto, logs), `import_flam_plain_carrier` (logs, relecture), `_clog`, `_bt_fingerprint`, `_info_title`, `firmware_check_carrier_imports` (appelé dans le constructeur avant `update_pack_index`), `_record_carrier_import` ; cache invalidé dans `update_pack_index` |
 | `pkg/ierWorker.py` | `ACTION_IMPORT_CARRIER = 13`, paramètre `carrier`, tâche `_task_import_carrier` |
 | `pkg/main_window.py` | `ts_import_carrier()` (refus zip importé, liste de choix du carrier), menu carrier grisé sans carrier, `ts_flam_bt_show()`, `ts_flam_bt_add()`, `worker_launch(..., carrier=)`, `APP_VERSION` |
 | `pkg/ui/main.ui`, `pkg/ui/main_ui.py` | « Stories → Import plain.pk (Carrier) », sous-menu « Tools → Flam bt (carrier) » |

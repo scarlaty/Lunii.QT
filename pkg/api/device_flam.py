@@ -66,6 +66,8 @@ class FlamDevice(QtCore.QObject):
 
         # loading internal stories + pi update for duplicates filtering
         self.stories = feed_stories(self.mount_point)
+        # must run before update_pack_index(), which deletes the firmware library cache
+        self.firmware_check_carrier_imports()
         self.update_pack_index()
 
     @property
@@ -686,6 +688,76 @@ class FlamDevice(QtCore.QObject):
         except (ValueError, IndexError):
             return ""
 
+    @staticmethod
+    def _load_carrier_imports() -> dict:
+        try:
+            with open(FLAM_CARRIER_IMPORTS, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def _save_carrier_imports(records: dict):
+        os.makedirs(os.path.dirname(FLAM_CARRIER_IMPORTS), exist_ok=True)
+        with open(FLAM_CARRIER_IMPORTS, "w", encoding="utf-8") as fp:
+            json.dump(records, fp, indent=2, ensure_ascii=False)
+
+    def _record_carrier_import(self, story_uuid: str, title: str, carrier: dict):
+        """Mémorise un import carrier pour le contrôle firmware au prochain branchement."""
+        records = self._load_carrier_imports()
+        records.setdefault(self.snu_str, {})[story_uuid] = {
+            "title":     title,
+            "imported":  time.strftime("%Y-%m-%d %H:%M:%S"),
+            "fw_main":   self.fw_main,
+            "carrier":   f"{carrier['key_file'][:4].hex()}.../{self._bt_fingerprint(carrier['bt'])}",
+            "status":    "pending",
+            "checked":   None,
+        }
+        self._save_carrier_imports(records)
+
+    def firmware_check_carrier_imports(self) -> dict:
+        """Vérifie, via usr/0/library.cache, que le firmware a déchiffré les histoires importées en carrier.
+
+        Le firmware reconstruit library.cache au démarrage avec les titres qu'il a su déchiffrer ;
+        lunii-qt le supprime à chaque écriture (update_pack_index). Donc :
+          - cache absent              -> "pending" (la Flam n'a pas redémarré depuis la dernière écriture)
+          - cache présent + titre     -> "ok"      (titre déchiffré par le firmware)
+          - cache présent, sans titre -> "fail"    (cache reconstruit après l'import, titre absent)
+        À appeler AVANT update_pack_index(). Retourne { uuid: status } pour cette Flam.
+        """
+        logger = logging.getLogger(LUNII_LOGGER)
+        records = self._load_carrier_imports()
+        device_records = records.get(self.snu_str, {})
+        present = {str(s.uuid) for s in self.stories}
+        to_check = {u: r for u, r in device_records.items() if u in present}
+        if not to_check:
+            return {}
+
+        cache_path = Path(self.mount_point).joinpath(LIB_CACHE)
+        cache = cache_path.read_bytes() if cache_path.is_file() else None
+        results = {}
+        for story_uuid, rec in to_check.items():
+            # le titre d'info peut contenir de longs blancs : on cherche son premier segment
+            needle = rec["title"].split("  ")[0].strip()[:32]
+            if cache is None:
+                status = "pending"
+                detail = "library.cache absent : ejecter la Flam, la redemarrer, puis la rebrancher"
+            elif needle and needle.encode("utf-8") in cache:
+                status = "ok"
+                detail = "titre dechiffre par le firmware"
+            else:
+                status = "fail"
+                detail = "titre absent du cache reconstruit : histoire probablement illisible par le firmware"
+            if status != "pending":
+                rec["status"], rec["checked"] = status, time.strftime("%Y-%m-%d %H:%M:%S")
+            results[story_uuid] = status
+            logger.log(logging.WARNING if status == "fail" else logging.INFO,
+                       f"[carrier] firmware check {story_uuid[-8:].upper()} {rec['title'][:40]!r} : "
+                       f"{status.upper()} - {detail} (fw {self.fw_main}, carrier {rec['carrier']}, "
+                       f"cache {len(cache) if cache is not None else 0}B)")
+        self._save_carrier_imports(records)
+        return results
+
     def find_available_carriers(self, refresh: bool = False) -> list:
         """Retourne les histoires du device utilisables comme carrier, triées.
 
@@ -925,13 +997,18 @@ class FlamDevice(QtCore.QObject):
                    f"readback : key {(output_path / 'key').read_bytes()[:4].hex()}..., info {len(info_data)}B, "
                    f"decrypts={readback_ok}, title={self._info_title(carrier['bt'], info_data)!r}")
 
+        # --- Mémoriser l'import pour le contrôle firmware au prochain branchement ---
+        if readback_ok:
+            self._record_carrier_import(str(new_uuid), self._info_title(carrier["bt"], info_data), carrier)
+
         # --- Enregistrer l'histoire ---
         loaded_story = Story(new_uuid)
         self.stories.append(loaded_story)
         self.update_pack_index()
         self._clog(logging.INFO, f"import end : {short_uuid} in {time.time() - ts_start:.0f} s. "
                                  f"To validate : eject the Flam, reboot it, check the title is readable and the story plays, "
-                                 f"then report the result with these [carrier] logs.")
+                                 f"then plug it back : Lunii.QT logs a '[carrier] firmware check' line. "
+                                 f"Report the result with these [carrier] logs.")
         self.signal_logger.emit(logging.INFO, QCoreApplication.translate(
             "FlamDevice", "✅ Carrier import OK — {}").format(short_uuid))
         return True
