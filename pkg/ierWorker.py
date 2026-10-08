@@ -30,6 +30,7 @@ ACTION_FACTORY = 8
 ACTION_DB_IMPORT = 9
 ACTION_DOWNLOAD = 11
 ACTION_FFMPEG = 12
+ACTION_IMPORT_CARRIER = 13
 
 class ierWorker(QObject):
     signal_total_progress = QtCore.Signal(int, int)
@@ -39,7 +40,7 @@ class ierWorker(QObject):
     signal_message = QtCore.Signal(str)
     signal_showlog = QtCore.Signal()
 
-    def __init__(self, device: LuniiDevice, action, item_list=None, out_dir=None, update_size=False):
+    def __init__(self, device: LuniiDevice, action, item_list=None, out_dir=None, update_size=False, carrier=None):
         super().__init__()
 
         self.abort_process = False
@@ -48,6 +49,7 @@ class ierWorker(QObject):
         self.items = item_list
         self.out_dir = out_dir
         self.update_size = update_size      # stories size to be computed at the end of import
+        self.carrier = carrier              # dict {key_file, bt} for ACTION_IMPORT_CARRIER
 
     def process(self):
         # cleaning any previous abortion
@@ -79,6 +81,8 @@ class ierWorker(QObject):
                 self._task_download()
             elif self.action == ACTION_FFMPEG:
                 self._task_ffmpeg()
+            elif self.action == ACTION_IMPORT_CARRIER:
+                self._task_import_carrier()
             else:
                 raise Exception("Unsupported command")
 
@@ -380,6 +384,34 @@ class ierWorker(QObject):
             self.signal_finished.emit()
             self.signal_refresh.emit()
             self.signal_message.emit(self.tr("✅ Downloaded {} items.").format(success))
+
+    def _task_import_carrier(self):
+        if not self.items or not self.carrier:
+            self.signal_message.emit(self.tr("🛑 No story or carrier specified"))
+            self.signal_finished.emit()
+            return
+
+        self.signal_showlog.emit()
+        self.signal_message.emit(self.tr("😮‍💨 This process is veeeeeeeeery long due to Flam firmware. 😴 Be patient ..."))
+        self.signal_message.emit(self.tr("Importing story with carrier..."))
+
+        ts_start = time.time()
+        result = self.audio_device.import_flam_plain_carrier(self.items, self.carrier)
+        ts_end = time.time()
+
+        if result:
+            duration = ts_end - ts_start
+            if duration > 120:
+                time_msg = "{} min {} s".format(int(duration // 60), int(duration % 60))
+            else:
+                time_msg = "{:d} s".format(int(duration))
+            self.signal_message.emit(self.tr("Time to import : {}").format(time_msg))
+            self.signal_message.emit(self.tr("👍 New story imported (carrier) : '{}'").format(self.items))
+        else:
+            self.signal_message.emit(self.tr("🛑 Failed to import (carrier) : '{}'").format(self.items))
+
+        self.signal_finished.emit()
+        self.signal_refresh.emit()
 
     def _task_ffmpeg(self):
         system = platform.system().lower()

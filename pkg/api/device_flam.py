@@ -1,4 +1,5 @@
 from glob import glob
+import hashlib
 import json
 import os.path
 import shutil
@@ -154,6 +155,7 @@ class FlamDevice(QtCore.QObject):
                                        f"VID/PID : 0x{vid:04X} / 0x{pid:04X}")
 
     def update_pack_index(self):
+        self._carriers_cache = None
         lib_path = Path(self.mount_point).joinpath(LIB_BASEDIR)
 
         # deleting previous files
@@ -525,6 +527,413 @@ class FlamDevice(QtCore.QObject):
         self.stories.append(loaded_story)
         self.update_pack_index()
 
+        return True
+
+    @staticmethod
+    def _read_carrier_from_zip(zip_path: str) -> dict | None:
+        """Extrait bt + key-file depuis un .zip Flam contenant un fichier 'bt'.
+
+        Format attendu (zip officiel Lunii ou backup avec bt) :
+          str/<UUID>/bt    <- 32 o : story_key(16) | story_iv(16)
+          str/<UUID>/key   <- 32 o : key-file (optionnel, peut être lu sur device)
+
+        Retourne { "uuid_str": str, "bt": bytes(32), "key_file": bytes|None }
+        ou None si bt absent.
+        """
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                names = z.namelist()
+                bt_entries  = [e for e in names if os.path.basename(e) == "bt"]
+                key_entries = [e for e in names if os.path.basename(e) == "key"]
+                if not bt_entries:
+                    return None
+                bt = z.read(bt_entries[0])
+                if len(bt) < 32:
+                    return None
+                uuid_str = Path(bt_entries[0]).parent.name
+                key_file = z.read(key_entries[0]) if key_entries else None
+                return {"uuid_str": uuid_str, "bt": bt[:32], "key_file": key_file}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _load_known_bts() -> list:
+        """Lit les bt connus depuis FLAM_KNOWN_BTS (~/.lunii-qt/flam_known_bts.txt).
+
+        Fichier volontairement hors dépôt : ces clés appartiennent à des comptes
+        Lunii précis. Format : une ligne par bt, 64 caractères hexadécimaux
+        (story_key 16 o + story_iv 16 o), espaces ignorés, '#' = commentaire.
+        Fichier absent ou ligne invalide : ignoré silencieusement.
+        """
+        bts = []
+        if not os.path.isfile(FLAM_KNOWN_BTS):
+            return bts
+        with open(FLAM_KNOWN_BTS, "r", encoding="utf-8") as fp:
+            for line in fp:
+                hex_str = line.split("#", 1)[0].replace(" ", "").strip()
+                if len(hex_str) != 64:
+                    continue
+                try:
+                    bts.append(bytes.fromhex(hex_str))
+                except ValueError:
+                    continue
+        return bts
+
+    @staticmethod
+    def save_known_bt(bt: bytes, comment: str) -> bool:
+        """Ajoute un bt à FLAM_KNOWN_BTS s'il n'y est pas déjà.
+
+        Le fichier est créé (avec un en-tête explicatif) s'il n'existe pas.
+        Retourne True si le bt a été ajouté, False s'il était déjà connu.
+        """
+        if len(bt) != 32 or bt in FlamDevice._load_known_bts():
+            return False
+        new_file = not os.path.isfile(FLAM_KNOWN_BTS)
+        os.makedirs(os.path.dirname(FLAM_KNOWN_BTS), exist_ok=True)
+        with open(FLAM_KNOWN_BTS, "a", encoding="utf-8") as fp:
+            if new_file:
+                fp.write("# Lunii.QT - bt Flam connus (story_key 16 o + story_iv 16 o, hex)\n"
+                         "# Une ligne par bt, '#' = commentaire. Fichier personnel : ne pas publier.\n")
+            fp.write(f"\n# {comment} - ajouté le {time.strftime('%Y-%m-%d')}\n")
+            fp.write(f"{bt[:16].hex()} {bt[16:32].hex()}\n")
+        return True
+
+    def stories_matching_bt(self, bt: bytes) -> list:
+        """Histoires du device (hors imports lunii-qt) dont l'info se déchiffre avec ce bt."""
+        matching = []
+        for story in self.stories:
+            story_path = os.path.join(
+                self.mount_point,
+                self.STORIES_BASEDIR if not story.hidden else self.HIDDEN_STORIES_BASEDIR,
+                str(story.uuid))
+            key_path = os.path.join(story_path, "key")
+            info_path = os.path.join(story_path, "info")
+            if not (os.path.isfile(key_path) and os.path.isfile(info_path)):
+                continue
+            with open(key_path, "rb") as fp:
+                if fp.read(32) == self.keyfile[:32]:
+                    continue
+            with open(info_path, "rb") as fp:
+                if self._bt_decrypts_info(bt, fp.read(4096)):
+                    matching.append(story)
+        return matching
+
+    @staticmethod
+    def _bt_decrypts_info(bt: bytes, info_data: bytes) -> bool:
+        """Vrai si le bt déchiffre le fichier info en texte lisible.
+
+        Déchiffrement AES-CBC de tout le fichier (quelques dizaines d'octets).
+        Valide si le résultat, hors padding nul final, est de l'UTF-8 strict
+        dont ≥90 % des caractères sont imprimables ou des retours à la ligne.
+        L'UTF-8 strict accepte les accents des titres et rejette le bruit
+        produit par une mauvaise clé.
+        """
+        length = len(info_data) // 16 * 16
+        if length == 0:
+            return False
+        try:
+            plain = AES.new(bt[:16], AES.MODE_CBC, bt[16:32]).decrypt(info_data[:length])
+            text = plain.rstrip(b"\x00").decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if len(text) < 4:
+            return False
+        printable = sum(1 for c in text if c.isprintable() or c in "\r\n")
+        return printable / len(text) >= 0.90
+
+    def _detect_bt_from_info(self, info_data: bytes) -> bytes | None:
+        """Tente de retrouver le bt en déchiffrant info avec les bt connus.
+
+        Candidats, dans l'ordre :
+          1. bt du fichier FLAM_KNOWN_BTS (~/.lunii-qt/flam_known_bts.txt)
+          2. bt déjà détectés sur ce device (cache mémoire)
+
+        La clé dérivée du SNU n'est volontairement PAS candidate : elle ne
+        déchiffre que les histoires importées par lunii-qt, dont le key-file
+        est illisible par le firmware récent (mauvais carriers).
+        """
+        if not hasattr(self, "_detected_bts"):
+            self._detected_bts = []
+
+        candidates = self._load_known_bts()
+        for cached in self._detected_bts:
+            if cached not in candidates:
+                candidates.append(cached)
+
+        for bt_candidate in candidates:
+            if self._bt_decrypts_info(bt_candidate, info_data):
+                if bt_candidate not in self._detected_bts:
+                    self._detected_bts.append(bt_candidate)
+                return bt_candidate
+        return None
+
+    def _clog(self, level, message):
+        # diagnostic logs for carrier feature, prefixed to be easy to grep / share
+        self.signal_logger.emit(level, f"[carrier] {message}")
+
+    @staticmethod
+    def _bt_fingerprint(bt: bytes) -> str:
+        # short, non reversible id of a bt : allows comparing logs without leaking the key
+        return hashlib.sha256(bt).hexdigest()[:8]
+
+    def _info_title(self, bt: bytes, info_data: bytes) -> str:
+        length = len(info_data) // 16 * 16
+        if not length:
+            return ""
+        try:
+            plain = AES.new(bt[:16], AES.MODE_CBC, bt[16:32]).decrypt(info_data[:length])
+            return plain.rstrip(b"\x00").decode("utf-8", "replace").splitlines()[0][:60]
+        except (ValueError, IndexError):
+            return ""
+
+    def find_available_carriers(self, refresh: bool = False) -> list:
+        """Retourne les histoires du device utilisables comme carrier, triées.
+
+        Exclusion : une histoire dont le key-file == self.keyfile a été importée
+        par lunii-qt ; ce key-file n'est pas lisible par le firmware récent,
+        elle ne peut donc pas servir de carrier.
+
+        Sources du bt, par ordre de fiabilité :
+          "bt"      : fichier bt direct dans str/<UUID>/bt
+          "sibling" : bt partagé avec une histoire sœur du même compte
+          "info"    : détection par déchiffrement du fichier info
+
+        "verified" = le bt déchiffre bien le fichier info de l'histoire.
+        Tri : vérifiés d'abord, puis par source.
+
+        Retourne une liste de dicts :
+          { "story": Story, "key_file": bytes(32), "bt": bytes(32),
+            "source": str, "verified": bool }
+        """
+        # résultat mis en cache, invalidé par update_pack_index()
+        if not refresh and getattr(self, "_carriers_cache", None) is not None:
+            return self._carriers_cache
+
+        known_bts = self._load_known_bts()
+        self._clog(logging.INFO, f"scan start : Flam SNU {self.snu_str}, fw main {self.fw_main}, "
+                                 f"fw comm {self.fw_comm}, {len(self.stories)} stories, "
+                                 f"device keyfile {self.keyfile[:4].hex()}...")
+        self._clog(logging.INFO, f"known bt file : {FLAM_KNOWN_BTS} "
+                                 f"({'present' if os.path.isfile(FLAM_KNOWN_BTS) else 'absent'}, "
+                                 f"{len(known_bts)} bt : {', '.join(self._bt_fingerprint(b) for b in known_bts) or '-'})")
+
+        source_rank = {"bt": 0, "sibling": 1, "info": 2}
+        carriers = []
+        stats = {"no_key": 0, "luniiqt": 0, "no_bt": 0}
+        for story in self.stories:
+            story_path = os.path.join(
+                self.mount_point,
+                self.STORIES_BASEDIR if not story.hidden else self.HIDDEN_STORIES_BASEDIR,
+                str(story.uuid))
+            tag = f"{story.short_uuid} {story.name[:40]!r}"
+
+            key_path = os.path.join(story_path, "key")
+            if not os.path.isfile(key_path):
+                stats["no_key"] += 1
+                self._clog(logging.INFO, f"{tag} : skipped, no key file")
+                continue
+            with open(key_path, "rb") as fp:
+                key_data = fp.read(32)
+
+            # histoire importée par lunii-qt : key-file non lisible par le firmware
+            if key_data == self.keyfile[:32]:
+                stats["luniiqt"] += 1
+                self._clog(logging.INFO, f"{tag} : skipped, key = device keyfile (lunii-qt re-ciphered import)")
+                continue
+
+            info_data = b""
+            info_path = os.path.join(story_path, "info")
+            if os.path.isfile(info_path):
+                with open(info_path, "rb") as fp:
+                    info_data = fp.read(4096)
+
+            bt_data = None
+            source = None
+
+            # Source 1 : bt direct dans le dossier
+            bt_path = os.path.join(story_path, "bt")
+            if os.path.isfile(bt_path):
+                with open(bt_path, "rb") as fp:
+                    candidate = fp.read(32)
+                if len(candidate) == 32:
+                    bt_data, source = candidate, "bt"
+                else:
+                    self._clog(logging.WARNING, f"{tag} : bt file has wrong size ({len(candidate)} bytes)")
+
+            # Source 2 : bt partagé avec une histoire sœur (même compte)
+            if not bt_data:
+                candidate = self.__find_shared_bt(key_data, story.uuid)
+                if candidate:
+                    bt_data, source = candidate, "sibling"
+
+            # Source 3 : détection par déchiffrement du fichier info
+            if not bt_data and info_data:
+                candidate = self._detect_bt_from_info(info_data)
+                if candidate:
+                    bt_data, source = candidate, "info"
+
+            if bt_data and len(bt_data) == 32:
+                verified = source == "info" or self._bt_decrypts_info(bt_data, info_data)
+                carriers.append({
+                    "story":    story,
+                    "key_file": key_data,
+                    "bt":       bt_data,
+                    "source":   source,
+                    "verified": verified,
+                })
+                self._clog(logging.INFO, f"{tag} : CARRIER key {key_data[:4].hex()}... bt {self._bt_fingerprint(bt_data)} "
+                                         f"source={source} verified={verified} info={len(info_data)}B"
+                                         + (f" title={self._info_title(bt_data, info_data)!r}" if verified else ""))
+            else:
+                stats["no_bt"] += 1
+                self._clog(logging.INFO, f"{tag} : no bt found (key {key_data[:4].hex()}..., "
+                                         f"bt file {'yes' if os.path.isfile(bt_path) else 'no'}, info {len(info_data)}B)")
+
+        carriers.sort(key=lambda c: (not c["verified"], source_rank[c["source"]]))
+
+        # sauvegarde des bt lus en fichier : Lunii peut les faire disparaître
+        for c in carriers:
+            if c["source"] in ("bt", "sibling") and c["verified"]:
+                if self.save_known_bt(c["bt"], f"key {c['key_file'][:4].hex()}... trouvé sur Flam {self.snu_str} "
+                                               f"({c['story'].name}, fichier bt)"):
+                    self._clog(logging.INFO, f"new bt {self._bt_fingerprint(c['bt'])} saved to {FLAM_KNOWN_BTS}")
+
+        accounts = {c["key_file"][:4].hex() for c in carriers}
+        self._clog(logging.INFO, f"scan end : {len(carriers)} carriers ({len(accounts)} account(s) : "
+                                 f"{', '.join(sorted(accounts)) or '-'}), skipped : {stats['luniiqt']} lunii-qt imports, "
+                                 f"{stats['no_bt']} without bt, {stats['no_key']} without key")
+
+        self._carriers_cache = carriers
+        return carriers
+
+    def import_flam_plain_carrier(self, plain_pk_path: str, carrier: dict) -> bool:
+        """Import un .plain.pk Flam en réutilisant le bt + key-file d'un carrier.
+
+        carrier = { "key_file": bytes(32), "bt": bytes(32) }
+        Peut venir de find_available_carriers() ou _read_carrier_from_zip().
+
+        Contourne V-9 (device_iv inconnu fw 1.x) : re-chiffre le contenu avec
+        bt_carrier, injecte le key-file carrier -> firmware déchiffre correctement.
+        """
+        ts_start = time.time()
+        carrier_sk  = carrier["bt"][:16]
+        carrier_iv  = carrier["bt"][16:32]
+        carrier_key = carrier["key_file"]
+
+        carrier_story = carrier.get("story")
+        self._clog(logging.INFO, f"import start : {plain_pk_path} ({os.path.getsize(plain_pk_path) // 1024} KB)")
+        self._clog(logging.INFO, f"device : Flam SNU {self.snu_str}, fw main {self.fw_main}, fw comm {self.fw_comm}")
+        self._clog(logging.INFO, f"carrier : {carrier_story.short_uuid + ' ' + repr(carrier_story.name) if carrier_story else 'zip ' + str(carrier.get('uuid_str'))} "
+                                 f"key {carrier_key[:4].hex() if carrier_key else '-'}... "
+                                 f"bt {self._bt_fingerprint(carrier['bt'])} source={carrier.get('source', 'zip')} "
+                                 f"verified={carrier.get('verified', '?')}")
+
+        if len(carrier_sk) != 16 or not carrier_key or len(carrier_key) < 32:
+            self.signal_logger.emit(logging.ERROR, QCoreApplication.translate(
+                "FlamDevice", "Carrier data invalid (bt or key_file wrong size)"))
+            return False
+
+        # --- Valider le plain.pk ---
+        try:
+            with zipfile.ZipFile(file=plain_pk_path):
+                pass
+        except zipfile.BadZipFile as e:
+            self.signal_logger.emit(logging.ERROR, e)
+            return False
+
+        with zipfile.ZipFile(file=plain_pk_path) as z:
+            zip_contents = z.namelist()
+            if FILE_UUID not in zip_contents:
+                self.signal_logger.emit(logging.ERROR, QCoreApplication.translate(
+                    "FlamDevice", "No UUID file found in archive. Unable to add this story."))
+                return False
+
+            try:
+                new_uuid = UUID(bytes=z.read(FILE_UUID))
+            except ValueError as e:
+                self.signal_logger.emit(logging.ERROR, e)
+                return False
+
+            if str(new_uuid) in self.stories:
+                self.signal_logger.emit(logging.WARNING, QCoreApplication.translate(
+                    "FlamDevice", "'{}' is already loaded !").format(
+                    self.stories.get_story(new_uuid).name))
+                return False
+
+            version = z.read("version").decode("utf-8", "replace").strip() if "version" in zip_contents else "-"
+            nb_lua = sum(1 for f in zip_contents if f.endswith(".lua"))
+            self._clog(logging.INFO, f"plain.pk : uuid {new_uuid}, {len(zip_contents)} entries, {nb_lua} lua, "
+                                     f"version file {version!r}, info.plain {'yes' if 'info.plain' in zip_contents else 'NO'}, "
+                                     f"main.lua {'yes' if 'main.lua' in zip_contents else 'NO'}")
+
+            long_uuid  = str(new_uuid).lower()
+            short_uuid = long_uuid[28:]
+            output_path = Path(self.mount_point) / self.STORIES_BASEDIR / long_uuid
+            if not output_path.exists():
+                output_path.mkdir(parents=True)
+
+            # --- Re-chiffrer avec le bt carrier ---
+            nb_ciphered = nb_verbatim = size_written = 0
+            for index, file in enumerate(zip_contents):
+                self.signal_story_progress.emit(short_uuid, index, len(zip_contents))
+
+                if self.abort_process:
+                    self.signal_logger.emit(logging.WARNING, QCoreApplication.translate(
+                        "FlamDevice", "Import aborted, performing cleanup on current story..."))
+                    self.__clean_up_story_dir(new_uuid)
+                    return False
+
+                if file in [FILE_UUID, FILE_META, FILE_THUMB]:
+                    continue
+                if z.getinfo(file).is_dir():
+                    continue
+
+                data_plain = z.read(file)
+
+                # Chiffrement AES-CBC bt carrier sur lua + info.plain
+                if file.endswith(".lua") or file.endswith(".plain"):
+                    data = aes_cipher(data_plain, carrier_sk, carrier_iv, 0, len(data_plain))
+                    nb_ciphered += 1
+                else:
+                    data = data_plain   # mp3, lif, version, mp3map -> verbatim
+                    nb_verbatim += 1
+
+                out_name = self.__get_flam_ciphered_name(file)
+                target = output_path / out_name
+                if not target.parent.exists():
+                    target.parent.mkdir(parents=True)
+
+                self.signal_logger.emit(logging.DEBUG, QCoreApplication.translate(
+                    "FlamDevice", "File {}/{} > {}").format(
+                    index + 1, len(zip_contents), out_name))
+                self.__write_with_progress(target, data)
+                size_written += len(data)
+
+        self._clog(logging.INFO, f"files written : {nb_ciphered} ciphered (lua/info), {nb_verbatim} verbatim, "
+                                 f"{size_written // 1024} KB")
+
+        # --- Injecter le key-file carrier ---
+        self.signal_logger.emit(logging.INFO, QCoreApplication.translate(
+            "FlamDevice", "Authorization file creation (carrier)..."))
+        (output_path / "key").write_bytes(carrier_key[:32])
+
+        # --- Relecture : le contenu écrit se déchiffre-t-il avec le bt carrier ? ---
+        info_path = output_path / "info"
+        info_data = info_path.read_bytes() if info_path.exists() else b""
+        readback_ok = self._bt_decrypts_info(carrier["bt"], info_data)
+        self._clog(logging.INFO if readback_ok else logging.ERROR,
+                   f"readback : key {(output_path / 'key').read_bytes()[:4].hex()}..., info {len(info_data)}B, "
+                   f"decrypts={readback_ok}, title={self._info_title(carrier['bt'], info_data)!r}")
+
+        # --- Enregistrer l'histoire ---
+        loaded_story = Story(new_uuid)
+        self.stories.append(loaded_story)
+        self.update_pack_index()
+        self._clog(logging.INFO, f"import end : {short_uuid} in {time.time() - ts_start:.0f} s. "
+                                 f"To validate : eject the Flam, reboot it, check the title is readable and the story plays, "
+                                 f"then report the result with these [carrier] logs.")
+        self.signal_logger.emit(logging.INFO, QCoreApplication.translate(
+            "FlamDevice", "✅ Carrier import OK — {}").format(short_uuid))
         return True
 
     def import_flam_plain(self, story_path):
