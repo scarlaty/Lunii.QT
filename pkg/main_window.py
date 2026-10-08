@@ -9,7 +9,7 @@ from PySide6 import QtCore, QtGui
 from PySide6.QtCore import QItemSelectionModel, QUrl, QSize
 from PySide6.QtGui import QFont, QShortcut, QKeySequence, QPixmap, Qt, QDesktopServices, QIcon, QGuiApplication, QColor
 from PySide6.QtWidgets import QMainWindow, QTreeWidgetItem, QFileDialog, QMessageBox, QLabel, QFrame, QHeaderView, \
-    QDialog, QApplication, QCheckBox
+    QDialog, QApplication, QCheckBox, QInputDialog
 
 from pkg import versionWorker
 from pkg.api import constants
@@ -20,7 +20,7 @@ from pkg.api.devices import find_devices
 from pkg.api.firmware import luniistore_get_authtoken, device_fw_download, device_fw_getlist
 from pkg.api.stories import story_load_db, DESC_NOT_FOUND, StoryList
 from pkg.ierWorker import ACTION_DOWNLOAD, ACTION_FFMPEG, ierWorker, ACTION_REMOVE, ACTION_IMPORT, ACTION_EXPORT, ACTION_SIZE, ACTION_CLEANUP, \
-    ACTION_FACTORY, ACTION_RECOVER, ACTION_FIND, ACTION_DB_IMPORT
+    ACTION_FACTORY, ACTION_RECOVER, ACTION_FIND, ACTION_DB_IMPORT, ACTION_IMPORT_CARRIER
 from pkg.nm_window import NightModeWindow
 from pkg.ui.about_ui import about_dlg
 from pkg.ui.debug_ui import DebugDialog, LUNII_LOGGER
@@ -39,7 +39,7 @@ COL_UUID_SIZE = 250
 COL_SIZE_SIZE = 90
 COL_EXTRA = 40
 
-APP_VERSION = "v3.1.4"
+APP_VERSION = "v3.1.5a1"
 
 """ 
 # TODO : 
@@ -87,6 +87,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.act_mv_bottom = None
         self.act_hide = None
         self.act_import = None
+        self.act_import_carrier = None
         self.act_export = None
         self.act_exportall = None
         self.act_remove = None
@@ -153,6 +154,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.act_hide = next(act for act in s_actions if act.objectName() == "actionHide")
         self.act_nm = next(act for act in s_actions if act.objectName() == "actionNight_Mode")
         self.act_import = next(act for act in s_actions if act.objectName() == "actionImport")
+        self.act_import_carrier = next(act for act in s_actions if act.objectName() == "actionImportCarrier")
+        self.menuStory.setToolTipsVisible(True)
         self.act_export = next(act for act in s_actions if act.objectName() == "actionExport")
         self.act_exportall = next(act for act in s_actions if act.objectName() == "actionExport_All")
         self.act_remove = next(act for act in s_actions if act.objectName() == "actionRemove")
@@ -573,6 +576,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.ts_nm()
         elif act_name == "actionImport":
             self.ts_import()
+        elif act_name == "actionImportCarrier":
+            self.ts_import_carrier()
         elif act_name == "actionExport":
             self.ts_export()
         elif act_name == "actionExport_All":
@@ -669,6 +674,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             # starting reset process
             self.worker_launch(ACTION_FACTORY)
 
+        elif act_name == "actionFlamBt_Show":
+            self.ts_flam_bt_show()
+        elif act_name == "actionFlamBt_Add":
+            self.ts_flam_bt_add()
+
     def cb_menu_lost(self, action: QtGui.QAction):
         # prepare for debug dialog to show
         self.__set_dbg_wndSize()
@@ -706,7 +716,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.act_import.setEnabled(True)
         # except if not story keys are present for v3
         if self.audio_device.device_version == LUNII_V3 and not self.audio_device.story_key:
-            self.act_import.setEnabled(False)   
+            self.act_import.setEnabled(False)
+        # carrier import only for Flam, and only if a story can lend its keys (bt known)
+        if self.audio_device.device_version == FLAM_V1:
+            has_carrier = bool(self.audio_device.find_available_carriers())
+            self.act_import_carrier.setEnabled(has_carrier)
+            self.act_import_carrier.setToolTip("" if has_carrier else self.tr(
+                "No carrier story: no bt known for the stories of this Flam (Tools > Flam bt > Add a bt...)"))
 
         # pointing to an item
         if self.tree_stories.selectedItems():
@@ -740,6 +756,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.act_getfw.setEnabled(device_selected)
         self.act_factory.setEnabled(False)
         self.menuLost_stories.setEnabled(device_selected)
+        self.menuFlam_bt.setEnabled(device_selected and self.audio_device.device_version == FLAM_V1)
 
         self.ffmpeg_present = which_ffmpeg() is not None
         self.act_transcode.setChecked(self.ffmpeg_present)
@@ -1216,6 +1233,127 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.sb_update(self.tr("Importing stories..."))
         self.worker_launch(ACTION_IMPORT, files)
 
+    def ts_import_carrier(self):
+        if not self.audio_device:
+            return
+
+        # Select the .plain.pk to import
+        file_filter = "Flam plain PK (*.plain.pk);;All files (*)"
+        plain_pk, _ = QFileDialog.getOpenFileName(self, self.tr("Select .plain.pk story"), "", file_filter)
+        if not plain_pk:
+            return
+
+        # Ask for optional carrier zip (if not, scan device)
+        zip_filter = "Flam zip (*.zip);;All files (*)"
+        carrier_zip, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select carrier zip (Cancel to scan device)"), "", zip_filter)
+
+        carrier = None
+        if carrier_zip:
+            carrier = self.audio_device._read_carrier_from_zip(carrier_zip)
+            if not carrier:
+                self.sb_update(self.tr("🛑 No valid bt found in selected zip"))
+                return
+            if carrier["key_file"] and carrier["key_file"][:32] == self.audio_device.keyfile[:32]:
+                self.sb_update(self.tr("🛑 Selected zip is a lunii-qt import, its key file is not usable as carrier"))
+                return
+        else:
+            candidates = self.audio_device.find_available_carriers()
+            if not candidates:
+                self.sb_update(self.tr("🛑 No carrier story found on device"))
+                return
+            carrier = candidates[0]
+            # several carriers : let the user pick one (best ranked first)
+            if len(candidates) > 1:
+                labels = []
+                for cand in candidates:
+                    check = "✔" if cand["verified"] else "?"
+                    labels.append(f"{check} {cand['story'].name} [{cand['story'].short_uuid}] - bt: {cand['source']}")
+                choice, ok = QInputDialog.getItem(self, self.tr("Select carrier story"),
+                                                  self.tr("Official story lending its keys:"), labels, 0, False)
+                if not ok:
+                    return
+                carrier = candidates[labels.index(choice)]
+
+        self.sb_update(self.tr("Importing story (carrier)..."))
+        self.worker_launch(ACTION_IMPORT_CARRIER, plain_pk, carrier=carrier)
+
+    def ts_flam_bt_show(self):
+        if not self.audio_device or self.audio_device.device_version != FLAM_V1:
+            return
+
+        # one line per account (key) having a usable bt on this Flam
+        accounts = {}
+        for cand in self.audio_device.find_available_carriers():
+            acc = accounts.setdefault(cand["key_file"], {"bt": cand["bt"], "stories": [], "verified": False})
+            acc["stories"].append(cand["story"].name)
+            acc["verified"] |= cand["verified"]
+
+        if not accounts:
+            QMessageBox.information(self, self.tr("Flam bt"), self.tr(
+                "No bt known for the stories of this Flam.\n\n"
+                "A bt is only available if Lunii left a 'bt' file in a story folder, "
+                "or if you add one (Tools > Flam bt > Add a bt...).\n\n"
+                "Known bt file: {}").format(FLAM_KNOWN_BTS))
+            return
+
+        lines = []
+        for key, acc in accounts.items():
+            lines.append(self.tr("Account key {}... : {} stories{}").format(
+                key[:4].hex(), len(acc["stories"]), "" if acc["verified"] else self.tr(" (not verified)")))
+            lines.append(f"{acc['bt'][:16].hex()} {acc['bt'][16:32].hex()}")
+            lines.append("")
+        text = "\n".join(lines)
+
+        box = QMessageBox(QMessageBox.Information, self.tr("Flam bt"),
+                          self.tr("bt usable as carrier on this Flam (story_key story_iv):"), parent=self)
+        box.setDetailedText(text + self.tr("Known bt file: {}").format(FLAM_KNOWN_BTS))
+        box.setInformativeText(text)
+        btn_copy = box.addButton(self.tr("Copy"), QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() == btn_copy:
+            QGuiApplication.clipboard().setText(text.strip())
+            self.sb_update(self.tr("bt copied to clipboard"))
+
+    def ts_flam_bt_add(self):
+        if not self.audio_device or self.audio_device.device_version != FLAM_V1:
+            return
+
+        hex_str, ok = QInputDialog.getText(self, self.tr("Add a bt"), self.tr(
+            "bt = story_key (16 bytes) + story_iv (16 bytes), 64 hex characters (spaces allowed):"))
+        if not ok or not hex_str.strip():
+            return
+
+        hex_str = "".join(hex_str.split())
+        try:
+            bt = bytes.fromhex(hex_str)
+        except ValueError:
+            bt = b""
+        if len(bt) != 32:
+            QMessageBox.warning(self, self.tr("Add a bt"), self.tr("Invalid bt: 64 hexadecimal characters expected."))
+            return
+
+        # checking bt against stories present on this Flam
+        matching = self.audio_device.stories_matching_bt(bt)
+        if not matching:
+            answer = QMessageBox.question(self, self.tr("Add a bt"), self.tr(
+                "This bt decrypts no story of this Flam: it will not provide any carrier here.\n\nSave it anyway?"))
+            if answer != QMessageBox.Yes:
+                return
+
+        comment = self.tr("added manually on Flam {}").format(self.audio_device.snu_str)
+        if matching:
+            comment += f" ({matching[0].name})"
+        if not FlamDevice.save_known_bt(bt, comment):
+            QMessageBox.information(self, self.tr("Add a bt"), self.tr("This bt is already known."))
+            return
+
+        self.audio_device.find_available_carriers(refresh=True)
+        QMessageBox.information(self, self.tr("Add a bt"), self.tr(
+            "bt saved in {}.\n{} story(ies) of this Flam can now be used as carrier.").format(
+            FLAM_KNOWN_BTS, len(matching)))
+
     def ts_dragenter_action(self, event):
         # a Lunii must be selected
         if not self.audio_device:
@@ -1270,7 +1408,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # start the thread
         self.version_thread.start()
 
-    def worker_launch(self, action, item_list=None, out_dir=None):
+    def worker_launch(self, action, item_list=None, out_dir=None, carrier=None):
         if self.worker:
             return
 
@@ -1278,7 +1416,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         #     return
 
         # setting up the thread
-        self.worker = ierWorker(self.audio_device, action, item_list, out_dir, not self.sizes_hidden and action == ACTION_IMPORT)
+        self.worker = ierWorker(self.audio_device, action, item_list, out_dir, not self.sizes_hidden and action == ACTION_IMPORT, carrier=carrier)
         self.thread = QtCore.QThread()
         self.worker.moveToThread(self.thread)
 

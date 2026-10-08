@@ -41,6 +41,7 @@ CACHE_DIR = os.path.join(CFG_DIR, "cache")
 FILE_OFFICIAL_DB = os.path.join(CFG_DIR, "official.db")
 FILE_THIRD_PARTY_DB = os.path.join(CFG_DIR, "third-party.db")
 V3_KEYS = os.path.join(CFG_DIR, "v3.keys")
+FLAM_KNOWN_BTS = os.path.join(CFG_DIR, "flam_known_bts.txt")
 
 
 def which_ffmpeg():

@@ -625,6 +625,13 @@
      <addaction name="actionRecover_stories"/>
      <addaction name="actionRemove_stories"/>
     </widget>
+    <widget class="QMenu" name="menuFlam_bt">
+     <property name="title">
+      <string>Flam bt (carrier)</string>
+     </property>
+     <addaction name="actionFlamBt_Show"/>
+     <addaction name="actionFlamBt_Add"/>
+    </widget>
     <addaction name="actionShow_size"/>
     <addaction name="actionShow_story_details"/>
     <addaction name="separator"/>
@@ -632,6 +639,7 @@
     <addaction name="actionGet_firmware"/>
     <addaction name="separator"/>
     <addaction name="menuLost_stories"/>
+    <addaction name="menuFlam_bt"/>
     <addaction name="actionFactory_reset"/>
     <addaction name="separator"/>
     <addaction name="actionTranscode"/>
@@ -649,6 +657,7 @@
     <addaction name="actionNight_Mode"/>
     <addaction name="separator"/>
     <addaction name="actionImport"/>
+    <addaction name="actionImportCarrier"/>
     <addaction name="actionExport"/>
     <addaction name="actionExport_All"/>
     <addaction name="actionRemove"/>
@@ -699,6 +708,15 @@
    </property>
    <property name="shortcut">
     <string notr="true">Ctrl+I</string>
+   </property>
+  </action>
+  <action name="actionImportCarrier">
+   <property name="icon">
+    <iconset resource="../../resources.qrc">
+     <normaloff>:/icon/res/import.png</normaloff>:/icon/res/import.png</iconset>
+   </property>
+   <property name="text">
+    <string>Import plain.pk (Carrier)</string>
    </property>
   </action>
   <action name="actionExport">
@@ -901,6 +919,16 @@
   <action name="actionRemove_stories">
    <property name="text">
     <string>Remove</string>
+   </property>
+  </action>
+  <action name="actionFlamBt_Show">
+   <property name="text">
+    <string>Show / copy known bt...</string>
+   </property>
+  </action>
+  <action name="actionFlamBt_Add">
+   <property name="text">
+    <string>Add a bt...</string>
    </property>
   </action>
   <action name="actionFactory_reset">
