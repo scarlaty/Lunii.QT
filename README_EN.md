@@ -6,6 +6,11 @@
 :fr: [README en français](README.md) :fr:
 
 # Lunii.QT
+
+> **Fork [scarlaty/Lunii.QT](https://github.com/scarlaty/Lunii.QT)** of [o-daneel/Lunii.QT](https://github.com/o-daneel/Lunii.QT).
+> **Experimental** addition: import unofficial / homemade stories (`.plain.pk`) on **Flam** by reusing the keys
+> of a story already on the device ("carrier"). Validated on a single Flam (fw 1.15.14): details, limits and
+> call for testers (French) in [IMPORT_CARRIER.md](IMPORT_CARRIER.md).
 A Python QT app to manage <u>Lunii</u> and <u>Flam</u> Storytellers, including **reorder** / **import** / **export** / **hide** / **firmware download**   
 for Windows 11 / MacOs (11 BigSur => 26 Tahoe) / Linux   
 (compatible with STUdio archive, **with** transcoding)
