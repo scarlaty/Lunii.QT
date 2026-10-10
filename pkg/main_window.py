@@ -418,6 +418,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.statusbar.showMessage(error)
                 return
 
+            # connect logger now : signals emitted outside a worker task (e.g. the Stories
+            # menu's carrier scan) would otherwise be silently dropped until the first
+            # import/export, since nothing is listening to signal_logger before that.
+            self.audio_device.signal_logger.connect(self.logger.log)
+
             self.statusbar.showMessage(f"")
 
             # widgets update with new device
@@ -1436,7 +1441,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if self.audio_device:
             self.audio_device.signal_story_progress.connect(self.slot_story_progress)
             self.audio_device.signal_file_progress.connect(self.slot_file_progress)
-            self.audio_device.signal_logger.connect(self.logger.log)
+            # signal_logger is connected as soon as the device is opened (see cb_dev_select)
         self.worker.signal_total_progress.connect(self.slot_total_progress)
         self.worker.signal_file_progress.connect(self.slot_file_progress)
         self.worker.signal_finished.connect(self.thread.quit)
