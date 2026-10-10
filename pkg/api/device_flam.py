@@ -148,6 +148,11 @@ class FlamDevice(QtCore.QObject):
             self.device_version = FLAM_V1
         else:
             self.device_version = UNDEF_DEV
+            logger.log(logging.WARNING,
+                       f"⚠️ Flam hardware not recognized (VID 0x{vid:04X} / PID 0x{pid:04X}, "
+                       f"expected 0x{FLAM_USB_VID_PID[0]:04X} / 0x{FLAM_USB_VID_PID[1]:04X}, "
+                       f"fw {self.fw_main}). Some features (carrier import, night mode) will be "
+                       f"unavailable. Please report this VID/PID and firmware version.")
 
         logger.log(logging.DEBUG, f"\n"
                                        f"SNU : {self.snu_str}\n"
