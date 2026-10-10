@@ -294,13 +294,22 @@ fichiers du device identiques avant et après (empreintes sha256).
   raison inconnue. Sur la Flam étudiée : 3 histoires sur 5 en juin 2026 (toutes
   du compte 5820), aucune aujourd'hui ; jamais pour les comptes B et C. Un
   utilisateur quelconque **n'est donc pas assuré** de trouver un `bt`.
-- **Non prouvé** : utiliser le couple (`key`, `bt`) d'un *autre* compte comme
-  carrier sur sa propre Flam. Ici, le couple utilisé est celui du compte de
-  l'utilisateur. Pour le vérifier, il faudrait un essai sur une seconde Flam
-  d'un autre compte.
-- Si cela fonctionnait, diffuser un couple (`key`, `bt`) reviendrait à
-  distribuer la clé d'un compte Lunii, utilisable par n'importe qui :
-  **ne jamais le publier** (dépôt, PR, forum).
+- **Tranché, négativement, par un test croisé (2026-10-10).** Un testeur a
+  importé le couple (`key`, `bt`) du compte 5820 (test ci-dessous) **sans
+  carrier**, sur une Flam en firmware 2.4.2 qui n'avait jamais eu ce compte :
+  titre illisible, vignette lisible (jamais chiffrée), histoire impossible à
+  lancer — la signature exacte d'une clé invalide. **Un couple (`key`, `bt`)
+  d'un compte ne fonctionne donc pas sur une Flam qui n'a jamais été liée à ce
+  compte.** Le secret qui déballe un `key` n'est pas une constante gravée dans
+  toutes les puces ; il dépend de l'appairage compte ↔ appareil (voir le
+  mécanisme `LINK_FAH` repéré en rétro-ingénierie). Pour qu'un carrier
+  fonctionne sur une Flam donnée, le `bt` doit provenir d'**un compte déjà lié
+  à cette Flam précise**, pas d'un compte quelconque.
+- Diffuser un couple (`key`, `bt`) ne permettrait donc même pas d'aider un
+  tiers au hasard : au mieux, cela ne fonctionne que pour les appareils déjà
+  liés au compte concerné. Cela reste malgré tout la clé d'un compte Lunii :
+  **ne jamais le publier** (dépôt, PR, forum) au-delà de ce que documente déjà
+  ce fichier.
 
 ---
 
@@ -398,6 +407,15 @@ cherche le titre dans `library.cache` :
 | `FAIL` | cache reconstruit mais titre absent : histoire probablement illisible |
 
 Validé sur la Flam de référence : Tobie Lolness importée en carrier → `OK`.
+
+> **Bug corrigé (2026-10-10, retour testeur).** Avant cette correction, ouvrir
+> le menu *Stories* sans avoir lancé aucun import/export ne montrait **aucune**
+> ligne `[carrier]` : le signal de log de l'appareil n'était connecté qu'au
+> premier lancement d'une tâche. Le scan tournait bien (le menu se grisait
+> correctement), mais ses logs étaient perdus. Corrigé en connectant ce signal
+> dès que l'appareil est sélectionné. Si tu utilises une version antérieure à
+> ce correctif, lance d'abord n'importe quelle action (ex. *Tools → Show
+> size*) avant d'ouvrir le menu *Stories*, pour que les logs apparaissent.
 
 **Ce que contiennent les logs `[carrier]`** : SNU et firmware (main / comm),
 fichier des `bt` (présent, nombre, empreintes), verdict pour chaque histoire
